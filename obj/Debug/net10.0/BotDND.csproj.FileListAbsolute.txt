@@ -65,6 +65,7 @@
 /Users/tester/Desktop/DasWasMine/BotDND/obj/Debug/net10.0/BotDND.AssemblyInfoInputs.cache
 /Users/tester/Desktop/DasWasMine/BotDND/obj/Debug/net10.0/BotDND.AssemblyInfo.cs
 /Users/tester/Desktop/DasWasMine/BotDND/obj/Debug/net10.0/BotDND.csproj.CoreCompileInputs.cache
+/Users/tester/Desktop/DasWasMine/BotDND/obj/Debug/net10.0/BotDND.sourcelink.json
 /Users/tester/Desktop/DasWasMine/BotDND/obj/Debug/net10.0/BotDND.csproj.Up2Date
 /Users/tester/Desktop/DasWasMine/BotDND/obj/Debug/net10.0/BotDND.dll
 /Users/tester/Desktop/DasWasMine/BotDND/obj/Debug/net10.0/refint/BotDND.dll

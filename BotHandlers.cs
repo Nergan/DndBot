@@ -13,6 +13,7 @@ public class BotHandlers
     private readonly ConcurrentDictionary<long, BaseHandler.UserState> _userStates = new();
     private readonly long[] _adminIds = { 1428337624 };
 
+    // In-memory хранилище персонажей
     private static readonly ConcurrentDictionary<long, List<Character>> _charactersStore = new();
     private static readonly ConcurrentDictionary<long, long> _characterIdCounter = new();
 
@@ -89,7 +90,6 @@ public class BotHandlers
         Console.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] OnMessage от {userId}, текст: '{text}'");
 
         var user = await _db.GetUser(userId) ?? new User { Id = userId, Role = "player" };
-        await _db.AddOrUpdateUser(user);
         bool isAdmin = _adminIds.Contains(userId);
         bool canMaster = (user.Role == "master" || isAdmin);
 
@@ -99,7 +99,7 @@ public class BotHandlers
         if (!_userStates.TryGetValue(userId, out var state))
             _userStates[userId] = state = new BaseHandler.UserState();
 
-        // Переключение режимов
+        // ----- ПЕРЕКЛЮЧЕНИЕ РЕЖИМОВ -----
         if (text == "👤 Игрок" || text == "👤 [Игрок]")
         {
             await _player.SwitchMode(userId, "player", hasChar, user.Role, user.RequestedRole, isAdmin);
@@ -119,31 +119,11 @@ public class BotHandlers
         // Обработка состояний ввода
         if (_userStates.TryGetValue(userId, out var inputState) && inputState.Action != "")
         {
-            if (inputState.Action == "char_create")
-            {
-                await HandleCharCreateInMemory(msg, inputState);
-                return;
-            }
-            else if (inputState.Action == "char_edit")
-            {
-                await HandleCharEditInMemory(msg, inputState);
-                return;
-            }
-            else if (inputState.Action == "group_create")
-            {
-                await HandleGroupCreateInMemory(msg, inputState);
-                return;
-            }
-            else if (inputState.Action == "warn_text")
-            {
-                await _admin.ProcessWarnText(userId, text, (long)inputState.Data["targetId"]);
-                return;
-            }
-            else
-            {
-                await _player.HandleStateInput(msg, inputState);
-                return;
-            }
+            if (inputState.Action == "char_create") { await HandleCharCreateInMemory(msg, inputState); return; }
+            else if (inputState.Action == "char_edit") { await HandleCharEditInMemory(msg, inputState); return; }
+            else if (inputState.Action == "group_create") { await HandleGroupCreateInMemory(msg, inputState); return; }
+            else if (inputState.Action == "warn_text") { await _admin.ProcessWarnText(userId, text, (long)inputState.Data["targetId"]); return; }
+            else { await _player.HandleStateInput(msg, inputState); return; }
         }
 
         // Основные команды
@@ -152,10 +132,7 @@ public class BotHandlers
             state.CurrentMode = "player";
             await _player.ShowMainMenu(userId, hasChar, user.Role, user.RequestedRole, isAdmin);
         }
-        else if (text == "📜 Персонажи")
-        {
-            await ShowCharactersMenu(userId);
-        }
+        else if (text == "📜 Персонажи") await ShowCharactersMenu(userId);
         else if (text == "👥 Группы") await _player.ShowGroupsMenu(userId);
         else if (text == "📅 Запись на игру")
         {
@@ -200,17 +177,13 @@ public class BotHandlers
         else if (text != null && text.StartsWith("/")) await _bot.SendTextMessageAsync(userId, "Используйте кнопки меню.");
     }
 
-    // In-memory управление персонажами
-    private List<Character> GetOrCreateCharacters(long userId)
-    {
-        return _charactersStore.GetOrAdd(userId, _ => new List<Character>());
-    }
+    // ====== IN-MEMORY управление персонажами ======
+    private List<Character> GetOrCreateCharacters(long userId) =>
+        _charactersStore.GetOrAdd(userId, _ => new List<Character>());
 
     private async Task CreateCharacterInMemory(Character character)
     {
-        // Гарантируем, что пользователь существует в БД (исправление FK constraint)
-        await _db.AddOrUpdateUser(new User { Id = character.UserId, Role = "player" });
-
+        await _db.ExecuteAsync("INSERT OR IGNORE INTO Users (Id, Role) VALUES (@Id, 'player')", new { Id = character.UserId });
         long newId = await _db.CreateCharacter(character);
         character.Id = newId;
         var list = GetOrCreateCharacters(character.UserId);
@@ -239,14 +212,7 @@ public class BotHandlers
         else if (state.Step == 3)
         {
             if (!int.TryParse(text, out int lvl)) { await _bot.SendTextMessageAsync(userId, "❌ Введите число."); return; }
-            var ch = new Character
-            {
-                UserId = userId,
-                Name = state.Data["name"].ToString()!,
-                Race = state.Data["race"].ToString()!,
-                Class = state.Data["class"].ToString()!,
-                Level = lvl
-            };
+            var ch = new Character { UserId = userId, Name = state.Data["name"].ToString()!, Race = state.Data["race"].ToString()!, Class = state.Data["class"].ToString()!, Level = lvl };
             await CreateCharacterInMemory(ch);
             var chars = GetOrCreateCharacters(userId);
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Персонаж {ch.Name} создан, всего у {userId}: {chars.Count}");
@@ -285,10 +251,7 @@ public class BotHandlers
         {
             int newLevel = ch.Level;
             if (text != "-" && !int.TryParse(text, out newLevel)) { await _bot.SendTextMessageAsync(userId, "❌ Неверный уровень."); return; }
-            ch.Name = state.Data["newName"].ToString()!;
-            ch.Race = state.Data["newRace"].ToString()!;
-            ch.Class = state.Data["newClass"].ToString()!;
-            ch.Level = newLevel;
+            ch.Name = state.Data["newName"].ToString()!; ch.Race = state.Data["newRace"].ToString()!; ch.Class = state.Data["newClass"].ToString()!; ch.Level = newLevel;
             await _db.UpdateCharacter(ch);
             await _bot.SendTextMessageAsync(userId, "✅ Персонаж обновлён!");
             _userStates.TryRemove(userId, out _);
@@ -303,11 +266,7 @@ public class BotHandlers
         if (state.Step == 0)
         {
             state.Data["name"] = text; state.Step = 1;
-            var markup = new InlineKeyboardMarkup(new[]
-            {
-                new[] { InlineKeyboardButton.WithCallbackData("🔓 Открытая", "group_private_no") },
-                new[] { InlineKeyboardButton.WithCallbackData("🔒 Приватная", "group_private_yes") }
-            });
+            var markup = new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("🔓 Открытая", "group_private_no") }, new[] { InlineKeyboardButton.WithCallbackData("🔒 Приватная", "group_private_yes") } });
             await _bot.SendTextMessageAsync(userId, "Выберите тип группы:", replyMarkup: markup);
         }
         else if (state.Step == 2)
@@ -315,12 +274,7 @@ public class BotHandlers
             if (!int.TryParse(text, out int max) || max < 2) { await _bot.SendTextMessageAsync(userId, "❌ Введите число ≥2."); return; }
             state.Data["maxMembers"] = max; state.Step = 3;
             var chars = GetOrCreateCharacters(userId);
-            if (chars.Count == 0)
-            {
-                await _bot.SendTextMessageAsync(userId, "❌ Нет персонажей.");
-                _userStates.TryRemove(userId, out _);
-                return;
-            }
+            if (chars.Count == 0) { await _bot.SendTextMessageAsync(userId, "❌ Нет персонажей."); _userStates.TryRemove(userId, out _); return; }
             var btns = chars.Select(c => new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"{c.Name} ({c.Class} ур.{c.Level})", $"group_create_char_{c.Id}") }).ToList();
             btns.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Отмена", "groups_menu") });
             await _bot.SendTextMessageAsync(userId, "Выберите персонажа для группы:", replyMarkup: new InlineKeyboardMarkup(btns));
@@ -333,25 +287,18 @@ public class BotHandlers
         Console.WriteLine($"[INMEM] Меню персонажей: у {userId} {characters.Count} персонажей");
         if (characters.Count == 0)
         {
-            await _bot.SendTextMessageAsync(userId, "У вас пока нет персонажей. Создайте первого!",
-                replyMarkup: new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("➕ Создать персонажа", "char_create") } }));
+            await _bot.SendTextMessageAsync(userId, "У вас пока нет персонажей. Создайте первого!", replyMarkup: new InlineKeyboardMarkup(new[] { new[] { InlineKeyboardButton.WithCallbackData("➕ Создать персонажа", "char_create") } }));
             return;
         }
         var buttons = new List<List<InlineKeyboardButton>>();
         foreach (var ch in characters)
-        {
-            buttons.Add(new List<InlineKeyboardButton>
-            {
-                InlineKeyboardButton.WithCallbackData($"📌 {ch.Name} ({ch.Class} ур.{ch.Level})", $"char_view_{ch.Id}"),
-                InlineKeyboardButton.WithCallbackData("✏️", $"char_edit_{ch.Id}"),
-                InlineKeyboardButton.WithCallbackData("🗑️", $"char_delete_{ch.Id}")
-            });
-        }
+            buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"📌 {ch.Name} ({ch.Class} ур.{ch.Level})", $"char_view_{ch.Id}"), InlineKeyboardButton.WithCallbackData("✏️", $"char_edit_{ch.Id}"), InlineKeyboardButton.WithCallbackData("🗑️", $"char_delete_{ch.Id}") });
         buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("➕ Создать нового", "char_create") });
         buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", "main_menu") });
         await _bot.SendTextMessageAsync(userId, "Ваши персонажи:", replyMarkup: new InlineKeyboardMarkup(buttons));
     }
 
+    // ====== Callback обработка ======
     private async Task OnCallback(CallbackQuery cb)
     {
         var userId = cb.From.Id;
@@ -362,13 +309,7 @@ public class BotHandlers
 
         try
         {
-            if (data == "main_menu")
-            {
-                var u = await _db.GetUser(userId);
-                var chars = GetOrCreateCharacters(userId);
-                await _player.ShowMainMenu(userId, chars.Count > 0, u?.Role ?? "player", u?.RequestedRole, _adminIds.Contains(userId));
-                return;
-            }
+            if (data == "main_menu") { var u = await _db.GetUser(userId); var chars = GetOrCreateCharacters(userId); await _player.ShowMainMenu(userId, chars.Count > 0, u?.Role ?? "player", u?.RequestedRole, _adminIds.Contains(userId)); return; }
             if (data == "groups_menu") { await _player.ShowGroupsMenu(userId); return; }
             if (data == "master_panel") { await _master.ShowMasterPanel(userId); return; }
             if (data == "admin_panel") { await _admin.ShowAdminPanel(userId); return; }
@@ -385,196 +326,145 @@ public class BotHandlers
             if (data.StartsWith("warn_user_")) { await _admin.WarnUser(userId, long.Parse(data.Split('_')[2])); return; }
             if (data.StartsWith("toggle_ban_")) { await _admin.ToggleBanUser(userId, long.Parse(data.Split('_')[2])); return; }
 
-            if (data == "master_week")
-            {
-                var today = DateTime.Today;
-                var start = today.AddDays(-(int)today.DayOfWeek + 1);
-                await _master.ShowMasterGamesList(userId, start, start.AddDays(6), "📅 Игры на этой неделе");
-                return;
-            }
-            if (data == "master_month")
-            {
-                var start = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
-                await _master.ShowMasterGamesList(userId, start, start.AddMonths(1).AddDays(-1), "📆 Игры в этом месяце");
-                return;
-            }
+            if (data == "master_week") { var today = DateTime.Today; var start = today.AddDays(-(int)today.DayOfWeek + 1); await _master.ShowMasterGamesList(userId, start, start.AddDays(6), "📅 Игры на этой неделе"); return; }
+            if (data == "master_month") { var start = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1); await _master.ShowMasterGamesList(userId, start, start.AddMonths(1).AddDays(-1), "📆 Игры в этом месяце"); return; }
             if (data == "master_calendar") { await _master.ShowMasterCalendar(userId, 0); return; }
             if (data.StartsWith("master_day_")) { var d = data.Substring(11); if (DateTime.TryParseExact(d, "yyyy-MM-dd", null, System.Globalization.DateTimeStyles.None, out var dt)) await _master.ShowMasterDayDetails(userId, dt); return; }
             if (data.StartsWith("master_confirm_")) { await _master.ConfirmGameByMaster(userId, long.Parse(data.Split('_')[2])); await _master.ShowMasterPanel(userId); return; }
 
             // Персонажи
-            if (data == "char_create")
-            {
-                _userStates[userId] = new BaseHandler.UserState { Action = "char_create", Step = 0, Data = new() };
-                await _bot.SendTextMessageAsync(userId, "Введите имя персонажа:");
-            }
-            else if (data.StartsWith("char_edit_"))
-            {
-                var charId = long.Parse(data.Split('_')[2]);
-                var ch = GetOrCreateCharacters(userId).FirstOrDefault(c => c.Id == charId);
-                if (ch == null) return;
-                _userStates[userId] = new BaseHandler.UserState { Action = "char_edit", Step = 0, Data = new() { ["charId"] = charId } };
-                await _bot.SendTextMessageAsync(userId, "Введите новое имя (или '-' чтобы оставить прежнее):");
-            }
-            else if (data.StartsWith("char_delete_"))
-            {
-                var charId = long.Parse(data.Split('_')[2]);
-                await DeleteCharacterInMemory(userId, charId);
-                await _bot.SendTextMessageAsync(userId, "✅ Персонаж удалён.");
-                await ShowCharactersMenu(userId);
-            }
-            else if (data.StartsWith("char_view_"))
-            {
-                var charId = long.Parse(data.Split('_')[2]);
-                var ch = GetOrCreateCharacters(userId).FirstOrDefault(c => c.Id == charId);
-                if (ch != null) await _bot.SendTextMessageAsync(userId, $"🧙 {ch.Name}\nРаса: {ch.Race}\nКласс: {ch.Class}\nУровень: {ch.Level}");
-            }
+            if (data == "char_create") { _userStates[userId] = new BaseHandler.UserState { Action = "char_create", Step = 0, Data = new() }; await _bot.SendTextMessageAsync(userId, "Введите имя персонажа:"); }
+            else if (data.StartsWith("char_edit_")) { var charId = long.Parse(data.Split('_')[2]); var ch = GetOrCreateCharacters(userId).FirstOrDefault(c => c.Id == charId); if (ch == null) return; _userStates[userId] = new BaseHandler.UserState { Action = "char_edit", Step = 0, Data = new() { ["charId"] = charId } }; await _bot.SendTextMessageAsync(userId, "Введите новое имя (или '-' чтобы оставить прежнее):"); }
+            else if (data.StartsWith("char_delete_")) { var charId = long.Parse(data.Split('_')[2]); await DeleteCharacterInMemory(userId, charId); await _bot.SendTextMessageAsync(userId, "✅ Персонаж удалён."); await ShowCharactersMenu(userId); }
+            else if (data.StartsWith("char_view_")) { var charId = long.Parse(data.Split('_')[2]); var ch = GetOrCreateCharacters(userId).FirstOrDefault(c => c.Id == charId); if (ch != null) await _bot.SendTextMessageAsync(userId, $"🧙 {ch.Name}\nРаса: {ch.Race}\nКласс: {ch.Class}\nУровень: {ch.Level}"); }
+
             // Группы
-            else if (data == "group_create")
-            {
-                var chars = GetOrCreateCharacters(userId);
-                if (chars.Count == 0)
-                {
-                    await _bot.SendTextMessageAsync(userId, "❌ Нет персонажей. Сначала создайте персонажа в разделе «Персонажи».");
-                    return;
-                }
-                _userStates[userId] = new BaseHandler.UserState { Action = "group_create", Step = 0, Data = new() };
-                await _bot.SendTextMessageAsync(userId, "Введите название группы:");
-            }
+            else if (data == "group_create") { var chars = GetOrCreateCharacters(userId); if (chars.Count == 0) { await _bot.SendTextMessageAsync(userId, "❌ Нет персонажей."); return; } _userStates[userId] = new BaseHandler.UserState { Action = "group_create", Step = 0, Data = new() }; await _bot.SendTextMessageAsync(userId, "Введите название группы:"); }
             else if (data == "group_join_list") await _player.ShowGroupJoinList(userId);
-            else if (data.StartsWith("group_view_")) await _player.ShowGroupView(userId, long.Parse(data.Split('_')[2]));
-            else if (data.StartsWith("group_join_team_")) await _player.OnGroupJoinRequest(userId, long.Parse(data.Split('_')[3]));
+            else if (data.StartsWith("group_view_")) { await ShowGroupViewExtended(userId, long.Parse(data.Split('_')[2])); }
+            else if (data.StartsWith("group_join_team_"))
+            {
+                var teamId = long.Parse(data.Split('_')[3]);
+                if (await _db.IsUserBannedFromTeam(teamId, userId)) { await _bot.SendTextMessageAsync(userId, "❌ Вы заблокированы в этой группе."); return; }
+                var characters = GetOrCreateCharacters(userId);
+                if (!characters.Any()) { await _bot.SendTextMessageAsync(userId, "❌ У вас нет персонажей."); return; }
+                if (characters.Count == 1) { await _db.AddTeamMember(teamId, userId, characters[0].Id); await _bot.SendTextMessageAsync(userId, $"✅ Вы вступили в группу с персонажем {characters[0].Name}."); await ShowGroupViewExtended(userId, teamId); }
+                else { var btns = characters.Select(ch => new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"{ch.Name} ({ch.Class} ур.{ch.Level})", $"group_join_confirm_{teamId}_{ch.Id}") }).ToList(); btns.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Отмена", "groups_menu") }); await _bot.SendTextMessageAsync(userId, "Выберите персонажа:", replyMarkup: new InlineKeyboardMarkup(btns)); }
+            }
             else if (data.StartsWith("group_join_confirm_"))
             {
-                var parts = data.Split('_'); await _db.AddTeamMember(long.Parse(parts[3]), userId, long.Parse(parts[4]));
-                await _bot.SendTextMessageAsync(userId, "✅ Вы вступили в группу!"); await _player.ShowGroupView(userId, long.Parse(parts[3]));
+                var parts = data.Split('_'); var teamId = long.Parse(parts[3]); var charId = long.Parse(parts[4]);
+                if (await _db.IsUserBannedFromTeam(teamId, userId)) { await _bot.SendTextMessageAsync(userId, "❌ Вы заблокированы в этой группе."); return; }
+                if (!GetOrCreateCharacters(userId).Any(c => c.Id == charId)) { await _bot.SendTextMessageAsync(userId, "❌ Персонаж не найден."); return; }
+                await _db.AddTeamMember(teamId, userId, charId);
+                await _bot.SendTextMessageAsync(userId, "✅ Вы вступили в группу!"); await ShowGroupViewExtended(userId, teamId);
             }
-            else if (data.StartsWith("group_leave_")) { await _db.RemoveTeamMember(long.Parse(data.Split('_')[2]), userId); await _bot.SendTextMessageAsync(userId, "Вы покинули группу."); await _player.ShowGroupsMenu(userId); }
-            else if (data.StartsWith("group_disband_")) { await _db.DeleteTeam(long.Parse(data.Split('_')[2])); await _bot.SendTextMessageAsync(userId, "Группа расформирована."); await _player.ShowGroupsMenu(userId); }
-            else if (data.StartsWith("group_change_char_")) { var parts = data.Split('_'); await _db.UpdateTeamMemberCharacter(long.Parse(parts[3]), userId, long.Parse(parts[4])); await _bot.SendTextMessageAsync(userId, "Персонаж обновлён."); await _player.ShowGroupView(userId, long.Parse(parts[3])); }
+            else if (data.StartsWith("group_leave_")) { var teamId = long.Parse(data.Split('_')[2]); await _db.RemoveTeamMember(teamId, userId); await _bot.SendTextMessageAsync(userId, "Вы покинули группу."); await _player.ShowGroupsMenu(userId); }
+            else if (data.StartsWith("group_disband_")) { var teamId = long.Parse(data.Split('_')[2]); await _db.DeleteTeam(teamId); await _bot.SendTextMessageAsync(userId, "Группа расформирована."); await _player.ShowGroupsMenu(userId); }
+            else if (data.StartsWith("group_change_char_")) { var parts = data.Split('_'); var teamId = long.Parse(parts[3]); var charId = long.Parse(parts[4]); await _db.UpdateTeamMemberCharacter(teamId, userId, charId); await _bot.SendTextMessageAsync(userId, "Персонаж обновлён."); await ShowGroupViewExtended(userId, teamId); }
             else if (data.StartsWith("group_invite_"))
             {
                 var teamId = long.Parse(data.Split('_')[2]);
+                var team = await _db.GetTeam(teamId);
+                if (team == null || !team.IsPrivate || !await _db.IsUserInTeam(userId, teamId)) { await _bot.SendTextMessageAsync(userId, "❌ Вы не можете приглашать в эту группу."); return; }
                 var avail = await _db.GetUsersWithCharactersExceptTeam(teamId, userId);
                 if (!avail.Any()) { await _bot.SendTextMessageAsync(userId, "Нет доступных игроков."); return; }
                 var btns = avail.Select(p => new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"{p.user.Username ?? p.user.FirstName} ({p.characters.Count} перс.)", $"invite_select_user_{teamId}_{p.user.Id}") }).ToList();
                 btns.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", $"group_view_{teamId}") });
                 await _bot.SendTextMessageAsync(userId, "Выберите игрока:", replyMarkup: new InlineKeyboardMarkup(btns));
             }
-            else if (data.StartsWith("invite_select_user_"))
+            else if (data.StartsWith("invite_select_user_")) { var parts = data.Split('_'); var teamId = long.Parse(parts[3]); var targetId = long.Parse(parts[4]); var chars = GetOrCreateCharacters(targetId); var btns = chars.Select(ch => new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"{ch.Name} ({ch.Class} ур.{ch.Level})", $"invite_send_{teamId}_{targetId}_{ch.Id}") }).ToList(); btns.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", $"group_invite_{teamId}") }); await _bot.SendTextMessageAsync(userId, "Выберите персонажа:", replyMarkup: new InlineKeyboardMarkup(btns)); }
+            else if (data.StartsWith("invite_send_")) { var parts = data.Split('_'); var teamId = long.Parse(parts[2]); var targetId = long.Parse(parts[3]); var charId = long.Parse(parts[4]); await _db.CreateInvitation(teamId, targetId, userId, charId); await _bot.SendTextMessageAsync(userId, "✅ Приглашение отправлено."); await _db.AddNotification(new Notification { UserId = targetId, Type = "invite", Content = $"Вас пригласили в команду #{teamId}", IsRead = false, CreatedAt = DateTime.UtcNow }); await ShowGroupViewExtended(userId, teamId); }
+            else if (data == "group_private_yes" || data == "group_private_no") { if (_userStates.TryGetValue(userId, out var st) && st.Action == "group_create" && st.Step == 1) { st.Data["isPrivate"] = data == "group_private_yes"; st.Step = 2; await _bot.SendTextMessageAsync(userId, "Введите макс. участников (мин. 2):"); } }
+            else if (data.StartsWith("group_create_char_"))
             {
-                var parts = data.Split('_'); var teamId = long.Parse(parts[3]); var targetId = long.Parse(parts[4]);
-                var chars = GetOrCreateCharacters(targetId);
-                var btns = chars.Select(ch => new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"{ch.Name} ({ch.Class} ур.{ch.Level})", $"invite_send_{teamId}_{targetId}_{ch.Id}") }).ToList();
-                btns.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", $"group_invite_{teamId}") });
-                await _bot.SendTextMessageAsync(userId, "Выберите персонажа:", replyMarkup: new InlineKeyboardMarkup(btns));
-            }
-            else if (data.StartsWith("invite_send_"))
-            {
-                var parts = data.Split('_'); var teamId = long.Parse(parts[2]); var targetId = long.Parse(parts[3]); var charId = long.Parse(parts[4]);
-                await _db.CreateInvitation(teamId, targetId, userId, charId);
-                await _bot.SendTextMessageAsync(userId, "✅ Приглашение отправлено.");
-                await _db.AddNotification(new Notification { UserId = targetId, Type = "invite", Content = $"Вас пригласили в команду #{teamId}", IsRead = false, CreatedAt = DateTime.UtcNow });
-                await _player.ShowGroupView(userId, teamId);
-            }
-            else if (data == "group_private_yes" || data == "group_private_no")
-            {
-                if (_userStates.TryGetValue(userId, out var st) && st.Action == "group_create" && st.Step == 1)
+                var charId = long.Parse(data.Split('_')[3]);
+                if (_userStates.TryGetValue(userId, out var st) && st.Action == "group_create" && st.Step == 3)
                 {
-                    st.Data["isPrivate"] = data == "group_private_yes"; st.Step = 2;
-                    await _bot.SendTextMessageAsync(userId, "Введите макс. участников (мин. 2):");
+                    await _db.ExecuteAsync("INSERT OR IGNORE INTO Users (Id, Role) VALUES (@Id, 'player')", new { Id = userId });
+                    var character = await _db.GetCharacter(charId);
+                    if (character == null) { var memChar = GetOrCreateCharacters(userId).FirstOrDefault(c => c.Id == charId); if (memChar != null) await _db.CreateCharacter(memChar); else { await _bot.SendTextMessageAsync(userId, "❌ Персонаж не найден."); return; } }
+                    if (await _db.IsCharacterCaptainInAnyTeam(charId)) { await _bot.SendTextMessageAsync(userId, "❌ Этот персонаж уже капитан."); return; }
+                    await _db.ExecuteAsync("PRAGMA foreign_keys=OFF;");
+                    var team = new Team { Name = st.Data["name"].ToString()!, CaptainUserId = userId, IsPrivate = (bool)st.Data["isPrivate"], MaxMembers = (int)st.Data["maxMembers"], CreatedAt = DateTime.UtcNow };
+                    var teamId = await _db.CreateTeam(team);
+                    await _db.UpdateTeamMemberCharacter(teamId, userId, charId);
+                    await _db.ExecuteAsync("PRAGMA foreign_keys=ON;");
+                    await _bot.SendTextMessageAsync(userId, $"✅ Группа '{team.Name}' создана!");
+                    _userStates.TryRemove(userId, out _);
+                    await _player.ShowGroupsMenu(userId);
                 }
             }
-   else if (data.StartsWith("group_create_char_"))
-{
-    var charId = long.Parse(data.Split('_')[3]);
-    if (_userStates.TryGetValue(userId, out var st) && st.Action == "group_create" && st.Step == 3)
-    {
-        // Гарантируем, что пользователь существует в БД
-        await _db.AddOrUpdateUser(new User { Id = userId, Role = "player" });
 
-        // Проверяем, существует ли персонаж в БД, и если нет — создаём его (на случай рассинхронизации)
-        var character = await _db.GetCharacter(charId);
-        if (character == null)
-        {
-            var memChar = GetOrCreateCharacters(userId).FirstOrDefault(c => c.Id == charId);
-            if (memChar != null)
+            // ====== УПРАВЛЕНИЕ УЧАСТНИКАМИ ======
+            else if (data.StartsWith("group_manage_members_"))
             {
-                await _db.CreateCharacter(memChar);
+                var teamId = long.Parse(data.Split('_')[3]);
+                await ShowManageMembersMenu(userId, teamId);
             }
-            else
-            {
-                await _bot.SendTextMessageAsync(userId, "❌ Персонаж не найден.");
-                return;
-            }
-        }
-
-        if (await _db.IsCharacterCaptainInAnyTeam(charId))
-        {
-            await _bot.SendTextMessageAsync(userId, "❌ Этот персонаж уже капитан.");
-            return;
-        }
-
-        var team = new Team
-        {
-            Name = st.Data["name"].ToString()!,
-            CaptainUserId = userId,
-            IsPrivate = (bool)st.Data["isPrivate"],
-            MaxMembers = (int)st.Data["maxMembers"],
-            CreatedAt = DateTime.UtcNow
-        };
-
-        var teamId = await _db.CreateTeam(team);
-        await _db.UpdateTeamMemberCharacter(teamId, userId, charId);
-        await _bot.SendTextMessageAsync(userId, $"✅ Группа '{team.Name}' создана!");
-        _userStates.TryRemove(userId, out _);
-        await _player.ShowGroupsMenu(userId);
-    }
-}
-            // Запись на игру
-            else if (data.StartsWith("day_"))
-            {
-                if (DateTime.TryParse(data.Substring(4), out var date))
-                {
-                    await ShowDayDetails(userId, date);
-                }
-            }
-            else if (data.StartsWith("book_team_"))
+            else if (data.StartsWith("group_kick_"))
             {
                 var parts = data.Split('_');
                 var teamId = long.Parse(parts[2]);
-                var date = DateTime.Parse(parts[3]);
-                await _player.ShowTimeSelection(userId, teamId, "team", date);
+                var targetUserId = long.Parse(parts[3]);
+                var team = await _db.GetTeam(teamId);
+                bool isAdmin = _adminIds.Contains(userId);
+                if (team != null && (team.CaptainUserId == userId || isAdmin))
+                {
+                    await _db.RemoveTeamMember(teamId, targetUserId);
+                    await _bot.SendTextMessageAsync(userId, "✅ Участник исключён из группы.");
+                }
+                else await _bot.SendTextMessageAsync(userId, "❌ У вас нет прав на это действие.");
+                await ShowManageMembersMenu(userId, teamId);
             }
-            else if (data.StartsWith("book_char_"))
+            else if (data.StartsWith("group_ban_"))
             {
                 var parts = data.Split('_');
-                var charId = long.Parse(parts[2]);
-                var date = DateTime.Parse(parts[3]);
-                if (GetOrCreateCharacters(userId).Any(c => c.Id == charId))
-                    await _player.ShowTimeSelection(userId, charId, "char", date);
-                else
-                    await _bot.SendTextMessageAsync(userId, "❌ Персонаж не найден.");
+                var teamId = long.Parse(parts[2]);
+                var targetUserId = long.Parse(parts[3]);
+                var team = await _db.GetTeam(teamId);
+                bool isAdmin = _adminIds.Contains(userId);
+                if (team != null && (team.CaptainUserId == userId || isAdmin))
+                {
+                    await _db.BanUserFromTeam(teamId, targetUserId);
+                    await _bot.SendTextMessageAsync(userId, "🚫 Пользователь заблокирован для этой группы.");
+                }
+                else await _bot.SendTextMessageAsync(userId, "❌ У вас нет прав на это действие.");
+                await ShowManageMembersMenu(userId, teamId);
             }
+            else if (data.StartsWith("group_unban_"))
+            {
+                var parts = data.Split('_');
+                var teamId = long.Parse(parts[2]);
+                var targetUserId = long.Parse(parts[3]);
+                var team = await _db.GetTeam(teamId);
+                bool isAdmin = _adminIds.Contains(userId);
+                if (team != null && (team.CaptainUserId == userId || isAdmin))
+                {
+                    await _db.UnbanUserFromTeam(teamId, targetUserId);
+                    await _bot.SendTextMessageAsync(userId, "🔓 Пользователь разблокирован для этой группы.");
+                }
+                else await _bot.SendTextMessageAsync(userId, "❌ У вас нет прав на это действие.");
+                await ShowManageMembersMenu(userId, teamId);
+            }
+
+            // Запись на игру
+            else if (data.StartsWith("day_")) { if (DateTime.TryParse(data.Substring(4), out var date)) await ShowDayDetails(userId, date); }
+            else if (data.StartsWith("book_team_")) { var parts = data.Split('_'); await _player.ShowTimeSelection(userId, long.Parse(parts[2]), "team", DateTime.Parse(parts[3])); }
+            else if (data.StartsWith("book_char_")) { var parts = data.Split('_'); var charId = long.Parse(parts[2]); var date = DateTime.Parse(parts[3]); if (GetOrCreateCharacters(userId).Any(c => c.Id == charId)) await _player.ShowTimeSelection(userId, charId, "char", date); else await _bot.SendTextMessageAsync(userId, "❌ Персонаж не найден."); }
             else if (data.StartsWith("book_time_select_"))
             {
                 var parts = data.Split('_');
-                var entityType = parts[3];
-                var entityId = long.Parse(parts[4]);
-                var date = DateTime.Parse(parts[5]);
-                var hour = int.Parse(parts[6]);
-                var timeStr = $"{hour:00}:00:00";
-
-                var existing = await _db.GetGameSessionsForDate(date);
-                if (entityType == "team" && existing.Any(s => s.PlayerId == userId && s.Time == timeStr))
-                { await _bot.SendTextMessageAsync(userId, "❌ Вы уже записаны на это время как игрок."); return; }
-                if (existing.Any(s => (s.PlayerId == userId || s.TeamId == entityId) && s.Time == timeStr))
-                { await _bot.SendTextMessageAsync(userId, "❌ Вы/команда уже записаны на это время."); return; }
-
+                var entityType = parts[3]; var entityId = long.Parse(parts[4]); var date = DateTime.Parse(parts[5]); var hour = int.Parse(parts[6]); var timeStr = $"{hour:00}:00:00";
+                await _db.ExecuteAsync("INSERT OR IGNORE INTO Users (Id, Role) VALUES (@Id, 'player')", new { Id = userId });
+                if (entityType == "char") { var character = await _db.GetCharacter(entityId); if (character == null) { var memChar = GetOrCreateCharacters(userId).FirstOrDefault(c => c.Id == entityId); if (memChar != null) await _db.CreateCharacter(memChar); else { await _bot.SendTextMessageAsync(userId, "❌ Персонаж не найден."); return; } } }
+                var allSessions = await _db.GetGameSessionsForDate(date);
+                if (allSessions.Any(s => s.IsConfirmed && s.Time == timeStr && ((entityType == "char" && s.CharacterId == entityId) || (entityType == "team" && s.TeamId == entityId)))) { await _bot.SendTextMessageAsync(userId, "❌ Это время уже подтверждено и занято."); return; }
+                if (entityType == "team" && allSessions.Any(s => s.PlayerId == userId && s.Time == timeStr)) { await _bot.SendTextMessageAsync(userId, "❌ Вы уже записаны на это время как игрок."); return; }
+                if (allSessions.Any(s => (s.PlayerId == userId || s.TeamId == entityId) && s.Time == timeStr)) { await _bot.SendTextMessageAsync(userId, "❌ Вы/команда уже записаны на это время."); return; }
                 var session = new GameSession { Date = date, Time = timeStr, IsConfirmed = false };
-                if (entityType == "team") session.TeamId = entityId;
-                else { session.PlayerId = userId; session.CharacterId = entityId; }
-                await _db.AddGameSession(session);
+                if (entityType == "team") session.TeamId = entityId; else { session.PlayerId = userId; session.CharacterId = entityId; }
+                await _db.ExecuteAsync("PRAGMA foreign_keys=OFF;"); await _db.AddGameSession(session); await _db.ExecuteAsync("PRAGMA foreign_keys=ON;");
                 await _bot.SendTextMessageAsync(userId, $"✅ Вы записаны на {date:dd.MM.yyyy} в {timeStr[..5]}.");
                 await ShowDayDetails(userId, date);
             }
@@ -587,18 +477,8 @@ public class BotHandlers
                 if (userSessions.Any(s => s.PlayerId == userId && s.Time == original.Time)) { await _bot.SendTextMessageAsync(userId, "❌ Вы уже записаны на это время."); return; }
                 var chars = GetOrCreateCharacters(userId);
                 if (!chars.Any()) { await _bot.SendTextMessageAsync(userId, "❌ Нет персонажей."); return; }
-                if (chars.Count == 1)
-                {
-                    var ns = new GameSession { Date = date, Time = original.Time, PlayerId = userId, CharacterId = chars[0].Id, IsConfirmed = false };
-                    await _db.AddGameSession(ns); await _bot.SendTextMessageAsync(userId, $"✅ Присоединились как {chars[0].Name}.");
-                    await ShowDayDetails(userId, date);
-                }
-                else
-                {
-                    var btns = chars.Select(c => new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"{c.Name}", $"join_confirm_{sessionId}_{c.Id}_{date:yyyy-MM-dd}") }).ToList();
-                    btns.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", $"day_{date:yyyy-MM-dd}") });
-                    await _bot.SendTextMessageAsync(userId, "Выберите персонажа:", replyMarkup: new InlineKeyboardMarkup(btns));
-                }
+                if (chars.Count == 1) { var ns = new GameSession { Date = date, Time = original.Time, PlayerId = userId, CharacterId = chars[0].Id, IsConfirmed = false }; await _db.AddGameSession(ns); await _bot.SendTextMessageAsync(userId, $"✅ Присоединились как {chars[0].Name}."); await ShowDayDetails(userId, date); }
+                else { var btns = chars.Select(c => new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData($"{c.Name}", $"join_confirm_{sessionId}_{c.Id}_{date:yyyy-MM-dd}") }).ToList(); btns.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", $"day_{date:yyyy-MM-dd}") }); await _bot.SendTextMessageAsync(userId, "Выберите персонажа:", replyMarkup: new InlineKeyboardMarkup(btns)); }
             }
             else if (data.StartsWith("join_confirm_"))
             {
@@ -609,34 +489,115 @@ public class BotHandlers
                 await _db.AddGameSession(ns); await _bot.SendTextMessageAsync(userId, "✅ Присоединились.");
                 await ShowDayDetails(userId, date);
             }
+
             // Оповещения
-            else if (data.StartsWith("invite_accept_"))
-            {
-                var invId = long.Parse(data.Split('_')[2]); var inv = await _db.GetInvitationById(invId);
-                if (inv?.Status == "pending")
-                {
-                    await _db.AddTeamMember(inv.TeamId, userId, inv.InvitedCharacterId);
-                    await _db.UpdateInvitationStatus(invId, "accepted");
-                    await _bot.SendTextMessageAsync(userId, "✅ Приглашение принято.");
-                }
-                else await _bot.SendTextMessageAsync(userId, "Приглашение устарело.");
-                await _player.ShowNotifications(userId);
-            }
-            else if (data.StartsWith("invite_decline_"))
-            {
-                await _db.UpdateInvitationStatus(long.Parse(data.Split('_')[2]), "declined");
-                await _bot.SendTextMessageAsync(userId, "❌ Приглашение отклонено.");
-                await _player.ShowNotifications(userId);
-            }
-            else if (data.StartsWith("notif_read_"))
-            {
-                var notif = await _db.GetNotificationById(long.Parse(data.Split('_')[2]));
-                if (notif != null) await _bot.SendTextMessageAsync(userId, $"🔔 {notif.Content}");
-            }
+            else if (data.StartsWith("invite_accept_")) { var invId = long.Parse(data.Split('_')[2]); var inv = await _db.GetInvitationById(invId); if (inv?.Status == "pending") { await _db.AddTeamMember(inv.TeamId, userId, inv.InvitedCharacterId); await _db.UpdateInvitationStatus(invId, "accepted"); await _bot.SendTextMessageAsync(userId, "✅ Приглашение принято."); } else await _bot.SendTextMessageAsync(userId, "Приглашение устарело."); await _player.ShowNotifications(userId); }
+            else if (data.StartsWith("invite_decline_")) { await _db.UpdateInvitationStatus(long.Parse(data.Split('_')[2]), "declined"); await _bot.SendTextMessageAsync(userId, "❌ Приглашение отклонено."); await _player.ShowNotifications(userId); }
+            else if (data.StartsWith("notif_read_")) { var notif = await _db.GetNotificationById(long.Parse(data.Split('_')[2])); if (notif != null) await _bot.SendTextMessageAsync(userId, $"🔔 {notif.Content}"); }
         }
         catch (Exception ex) { Console.WriteLine($"Ошибка OnCallback: {ex}"); }
     }
 
+    // ====== Меню управления участниками ======
+    private async Task ShowManageMembersMenu(long userId, long teamId)
+    {
+        var team = await _db.GetTeam(teamId);
+        if (team == null) return;
+        var members = await _db.GetTeamMembersWithCharacters(teamId);
+        var isCaptain = team.CaptainUserId == userId;
+        var isAdmin = _adminIds.Contains(userId);
+        if (!isCaptain && !isAdmin) { await _bot.SendTextMessageAsync(userId, "❌ Нет доступа."); return; }
+
+        var text = $"👥 Управление участниками группы «{team.Name}»:";
+        var buttons = new List<List<InlineKeyboardButton>>();
+
+        foreach (var member in members)
+        {
+            var memberId = member.user.Id;
+            if (memberId == userId) continue; // себя не показываем
+
+            var memberName = member.user.Username ?? member.user.FirstName;
+            var ch = member.character;
+            var charInfo = ch != null ? $" ({ch.Name})" : "";
+            var isBanned = await _db.IsUserBannedFromTeam(teamId, memberId);
+
+            var row = new List<InlineKeyboardButton>
+            {
+                InlineKeyboardButton.WithCallbackData($"👤 {memberName}{charInfo}", "ignore"),
+                InlineKeyboardButton.WithCallbackData("🚫 Выгнать", $"group_kick_{teamId}_{memberId}")
+            };
+            if (isBanned)
+                row.Add(InlineKeyboardButton.WithCallbackData("🔓 Разбан", $"group_unban_{teamId}_{memberId}"));
+            else
+                row.Add(InlineKeyboardButton.WithCallbackData("⛔ Забан", $"group_ban_{teamId}_{memberId}"));
+            buttons.Add(row);
+        }
+
+        buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", $"group_view_{teamId}") });
+        await _bot.SendTextMessageAsync(userId, text, replyMarkup: new InlineKeyboardMarkup(buttons));
+    }
+
+    // ====== Расширенное представление группы (без кнопок управления каждым участником) ======
+    private async Task ShowGroupViewExtended(long userId, long teamId)
+    {
+        var team = await _db.GetTeam(teamId);
+        if (team == null) return;
+        var members = await _db.GetTeamMembersWithCharacters(teamId);
+        var isCaptain = team.CaptainUserId == userId;
+        var isAdmin = _adminIds.Contains(userId);
+        var isMember = members.Any(m => m.user.Id == userId);
+        var captainUser = await _db.GetUser(team.CaptainUserId);
+        var captainName = captainUser?.Username ?? captainUser?.FirstName ?? team.CaptainUserId.ToString();
+
+        var text = $"🏷️ {team.Name}\n👑 Капитан: {captainName}\n🔒 {(team.IsPrivate ? "Приватная" : "Открытая")}\n👥 Участники: {members.Count}/{team.MaxMembers}\n\n";
+        foreach (var member in members)
+        {
+            var user = member.user;
+            var ch = member.character;
+            text += $"• {user.Username ?? user.FirstName} — {(ch != null ? $"{ch.Name} ({ch.Race}, {ch.Class} ур.{ch.Level})" : "❌ без персонажа")}\n";
+        }
+
+        var buttons = new List<List<InlineKeyboardButton>>();
+
+        if (isMember && !isCaptain)
+            buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🚪 Покинуть группу", $"group_leave_{teamId}") });
+
+        // Одна кнопка для управления участниками (капитан/админ)
+        if (isCaptain || isAdmin)
+        {
+            buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("👥 Управление участниками", $"group_manage_members_{teamId}") });
+        }
+
+        // Приглашение для участников приватной группы
+        if (team.IsPrivate && isMember)
+        {
+            buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("👥 Пригласить игрока", $"group_invite_{teamId}") });
+        }
+
+        // Смена персонажа для участников
+        if (isMember)
+        {
+            var userChars = GetOrCreateCharacters(userId);
+            if (userChars.Any())
+            {
+                var currentCharId = members.FirstOrDefault(m => m.user.Id == userId).character?.Id;
+                foreach (var ch in userChars)
+                {
+                    string label = $"🎭 {ch.Name}";
+                    if (currentCharId == ch.Id) label += " (текущий)";
+                    buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData(label, $"group_change_char_{teamId}_{ch.Id}") });
+                }
+            }
+        }
+
+        if (isCaptain)
+            buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🗑️ Расформировать группу", $"group_disband_{teamId}") });
+
+        buttons.Add(new List<InlineKeyboardButton> { InlineKeyboardButton.WithCallbackData("🔙 Назад", "groups_menu") });
+        await _bot.SendTextMessageAsync(userId, text, replyMarkup: new InlineKeyboardMarkup(buttons));
+    }
+
+    // ====== Детали дня ======
     private async Task ShowDayDetails(long userId, DateTime date)
     {
         var user = await _db.GetUser(userId) ?? new User { Id = userId, Role = "player" };
