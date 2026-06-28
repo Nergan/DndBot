@@ -10,7 +10,8 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        var token = "8926544978:AAHHVBL1VuHlg4KRDC0m0Vqq00B_yeJ_uR0"; // Замените на свой токен
+        var token = Environment.GetEnvironmentVariable("TOKEN") 
+            ?? throw new InvalidOperationException("Переменная окружения TOKEN не задана.");
         using var host = Host.CreateDefaultBuilder(args)
             .ConfigureServices((context, services) =>
             {
