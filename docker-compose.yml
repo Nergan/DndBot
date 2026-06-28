@@ -1,0 +1,15 @@
+services:
+  dndbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dndbot
+    restart: unless-stopped
+    environment:
+      # Set this to your local timezone so the bot's calendar and reminders are accurate
+      - TZ=Europe/Moscow 
+    volumes:
+      # Bind mounting a single file prevents overwriting the container's /app directory.
+      # IMPORTANT: You MUST create an empty 'dndbot.db' file on your host machine 
+      # next to this compose file BEFORE running 'docker compose up'.
+      - ./dndbot.db:/app/dndbot.db
